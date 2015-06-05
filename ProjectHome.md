@@ -1,0 +1,102 @@
+# Fast Sessions #
+
+`FastSessions` is a sessions class for `ActiveRecord` sessions store created to work fast (really fast). It uses some techniques which are not so widely known in developers' community and only when they cause huge problems, performance consultants are trying to help with them.
+
+
+## The Problem ##
+
+Original `ActiveRecord` sessions store is slow. It is fine for some low traffic blogs, but it is too slow to use it on some big/large/huge sites. First of all, it is slow because `ActiveRecord` is slow. It is powerful ORM framework, but it is overkill for such simple task as a sessions management.
+
+There are other possible solutions like cookie session store (session size is limited, no sensible data in sessions), memcached (too much RAM when you have many sessions + no persistence).
+
+That is why people created `SqlSession` store. It works with mysql directly with database APIs and works much faster than original AR session store. But it is still slow because:
+
+  * it creates/updates session on each hit - even dumb bots crawling your sites create thousands of thousands of useless records in your sessions table, 99% of hits do not require any session updates!
+
+  * it uses 32-char string as a key for sessions records - all databases work with string keys MUCH slower that with integers keys, so it would be much better to use integers, but we have so long session ids and all session stores use these session ids as a key.
+
+  * it uses auto\_increment primary key, which causes table-level locks in InnoDB for all MySQL versions prior to 5.1.21. These table-level locks with unnecessary inserts cause really weird problems for large sites.
+
+
+## The Solution ##
+
+`FastSessions` plugin was born as a hack created for [Scribd.com](http://www.scribd.com) (large RoR-based web project), which was suffering from `InnoDB` auto-increment table-level locks on sessions table.
+
+So, first of all, we removed `id` field from the table. Next step was to make lookups faster and we've used a following technique: instead of using (session\_id) as a lookup key, we started using (CRC32(session\_id), session\_id) - two-columns key which really helps MySQL to find sessions faster because key cardinality is higher (so, mysql is able to find a record earlier w/o checking a lots of index rows). We've benchmarked this approach and it shows 10-15% performance gain on large sessions tables.
+
+And last, but most powerful change we've tried to make was to not create database records for empty sessions and to not save sessions data back to database if this data has not been changed during current request processing. With this change we basically reduce inserts number by 50-90% (depends 0n application).
+
+All of these changes were implemented and you can use them automatically after a simple plugin installation.
+
+
+## Controversial Decisions ##
+
+Many plugin users would never think about one problem we've introduced when removed that auto-increment primary key, so I'd like to describe it here. The problem is following.
+
+`InnoDB` groups all data in tables by primary key. This means that when we create auto-increment primary key and insert records to a table, our sessions records are grouped together and saved sequentially on the disk. But if we'll make pretty random value (like crc32 of a random session id) a primary key, then every session record will be inserted in its own place and it will generate some random I/O which is not so good for I/O bound servers.
+
+So, we decided to let the user choose what primary key to use in his deployment of our plugin, so if you're going to use this module with MySQL 5.1.22+, then you'dlike to set
+```
+  CGI::Session::ActiveRecordStore::FastSessions.use_auto_increment = true
+```
+because it will provide you with consecutive data inserts in InnoDB. Another cases when you'd like to use it is when your MySQL server is I/O bound now and you do not want to add random I/O because of randomized primary key.
+
+
+## Working With Old AR Sessions Table ##
+
+If you do not like to loose old sessions created with default AR sessions plugin, you could set
+```
+  CGI::Session::ActiveRecordStore::FastSessions.fallback_to_old_table = true
+```
+and then all session reads will fall back to old sessions table if some session\_id was not found in default fast sessions table. Old sessions table name could be set using
+```
+  CGI::Session::ActiveRecordStore::FastSessions.old_table_name 
+```
+variable.
+
+
+This options make sessions slower so I'd recommend to use it during transition to new sessions table only. In this case you'll save your new sessions to the new table and will be able to drop old sessions table when your session expiration time will be over (we use 2 month period so in 2 months we'll be able to drop this old table and turn this option off).
+
+## Installation ##
+
+This plugin installation is pretty simple and described in a few steps below:
+
+1) Install this plugin sources in your `vendor/plugins` directory (it could be ./script/plugin install, or piston import command - it is up to you) from our SVN reposipory. For example:
+```
+$  piston import http://rails-fast-sessions.googlecode.com/svn/trunk/ vendor/plugins/fast_sessions
+```
+2) Enable `ActiveRecord` session store in your `config/environment.rb` file:
+```
+  Rails::Initializer.run do |config|
+    ......
+    config.action_controller.session_store = :active_record_store
+    ......
+  end
+```
+3) Create migration for your new sessions table:
+```
+ $ ./script/generate fast_session_migration AddFastSessions
+```
+4) Open your newly created migration and change `table_name` and `use_auto_increment` parameters of the plugin (if you want to).
+
+5) Run your migration:
+```
+$  rake db:migrate
+```
+6) Start your application and try to perform some actions which would definitely save some data to your session. Then check your `fast_sessions` table (if you did not renamed it) for a records.
+
+
+## Downloading ##
+
+Most recent version if this plugin could be found on the project's site:
+```
+  http://code.google.com/p/rails-fast-sessions/
+```
+or in SVN repository:
+```
+  http://rails-fast-sessions.googlecode.com/svn/trunk/
+```
+
+## Author ##
+
+This plugin has been created by Alexey Kovyrin. Development is sponsored by  [Scribd.com](http://www.scribd.com).
